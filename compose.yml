@@ -1,0 +1,198 @@
+# Full local stack: MVP, legal crawler, Postgres, Prometheus, Loki, Alloy, Tempo, Grafana.
+# Expected checkout layout:
+#   atualei-infra/
+#   atualei-legal-crawler/
+#   mvp-plataforma-anotacoes-juridicas/
+#
+# External PostgreSQL: create .runtime/db.env, .runtime/mvp.env, .runtime/crawler.env, then:
+#   docker compose up -d --build
+#
+# If the crawler/MVP container stays "unhealthy", check logs: docker logs atualei-legal-crawler-app
+# Common fixes:
+#   - DB_URL must use the DB private IP or DNS name, never localhost / 127.0.0.1.
+#   - If JDBC uses sslrootcert=... on the VM (e.g. /home/opc/...), use sslrootcert=/tmp/certs/oci-db-ca.pem and merge:
+#     docker compose -f compose.yml -f compose.oci-tls.yml up -d --build
+#     with OCI_DB_CA_PEM=/path/on/vm/to/ca.pem (see compose.oci-tls.yml).
+#   Local Postgres in Docker:
+#     docker compose -f compose.yml -f compose.local-db.yml --profile local-db up -d --build
+#
+# OCI TLS: merge compose.oci-tls.yml. JDBC may use
+#   sslrootcert=/home/opc/lexvita-db-ca.pem or sslrootcert=/tmp/certs/oci-db-ca.pem; both are bind-mounted.
+# The CA file on the host must be readable by non-root (chmod a+r): the app user inside the image is not opc.
+
+services:
+  db:
+    profiles:
+      - local-db
+    image: postgres:16
+    container_name: atualei-legal-crawler-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-plataforma_juridica}
+      POSTGRES_USER: ${POSTGRES_USER:-plataforma_juridica}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plataforma_juridica}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plataforma_juridica} -d ${POSTGRES_DB:-plataforma_juridica}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  crawler:
+    build:
+      context: ../atualei-legal-crawler
+      dockerfile: Dockerfile
+    container_name: atualei-legal-crawler-app
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+    env_file:
+      - path: .runtime/db.env
+        required: false
+      - path: .runtime/crawler.env
+        required: false
+    environment:
+      MANAGEMENT_OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      CRAWLER_STORAGE_BASE_PATH: /app/data/legal-sources
+      CRAWLER_OBSERVABILITY_LOG_FORMAT: json
+    ports:
+      - "${CRAWLER_PORT:-8080}:8080"
+    volumes:
+      - ../atualei-legal-crawler/data/legal-sources:/app/data/legal-sources
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health/readiness >/dev/null || curl -fsS http://localhost:8080/api/v1/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    restart: unless-stopped
+
+  mvp:
+    build:
+      context: ../mvp-plataforma-anotacoes-juridicas
+      dockerfile: Dockerfile
+    container_name: atualei-mvp-app
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+      crawler:
+        condition: service_healthy
+    env_file:
+      - path: .runtime/db.env
+        required: false
+      - path: .runtime/mvp.env
+        required: false
+    environment:
+      SERVER_PORT: "8082"
+      MANAGEMENT_OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      CRAWLER_ADMIN_BASE_URL: http://crawler:8080
+    ports:
+      - "${MVP_PORT:-8082}:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/actuator/health/readiness >/dev/null || curl -fsS http://localhost:8082/actuator/health/liveness >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 300s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: atualei-legal-crawler-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      crawler:
+        condition: service_healthy
+      # MVP is heavier than the crawler on first boot; do not block compose on its health (Prometheus retries scrapes).
+      mvp:
+        condition: service_started
+      loki:
+        condition: service_started
+      alloy:
+        condition: service_started
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: atualei-legal-crawler-loki
+    command:
+      - -config.file=/etc/loki/loki.yml
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.6.1
+    container_name: atualei-legal-crawler-alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "${ALLOY_PORT:-12345}:12345"
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: atualei-legal-crawler-tempo
+    user: "0:0"
+    command:
+      - -config.file=/etc/tempo.yml
+    ports:
+      - "${TEMPO_HTTP_PORT:-3200}:3200"
+      - "${TEMPO_OTLP_GRPC_PORT:-4317}:4317"
+      - "${TEMPO_OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./observability/tempo/tempo.yml:/etc/tempo.yml:ro
+      - tempo_data:/tmp/tempo
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: atualei-legal-crawler-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: light
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  loki_data:
+  alloy_data:
+  tempo_data:
+  grafana_data:

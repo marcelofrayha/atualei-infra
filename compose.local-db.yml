@@ -1,0 +1,14 @@
+# Merge with the main file when using --profile local-db so apps point at the compose Postgres service:
+#   docker compose -f compose.yml -f compose.local-db.yml --profile local-db up -d --build
+#
+# OCI Postgres TLS (optional): add -f compose.oci-tls.yml and export OCI_DB_CA_PEM=/path/to/ca.pem
+#
+# Ensure .runtime/db.env sets DB_USERNAME and DB_PASSWORD to match POSTGRES_* on the db service (defaults: plataforma_juridica).
+
+services:
+  crawler:
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-plataforma_juridica}
+  mvp:
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-plataforma_juridica}

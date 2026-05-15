@@ -1,0 +1,18 @@
+# Merge when TLS to OCI Postgres needs the VM's CA file inside containers.
+# Bootstrap sets OCI_DB_CA_PEM if it finds ~/lexvita-db-ca.pem or /home/opc/lexvita-db-ca.pem.
+# Manual: docker compose -f compose.yml -f compose.oci-tls.yml up -d --build
+#
+# Mounts the host PEM twice so common db.env URLs keep working:
+#   sslrootcert=/tmp/certs/oci-db-ca.pem   OR   sslrootcert=/home/opc/lexvita-db-ca.pem
+#
+# The PEM on the VM must allow read by any user (e.g. chmod a+r): JRE in the image runs as non-root "app".
+
+services:
+  crawler:
+    volumes:
+      - ${OCI_DB_CA_PEM}:/tmp/certs/oci-db-ca.pem:ro
+      - ${OCI_DB_CA_PEM}:/home/opc/lexvita-db-ca.pem:ro
+  mvp:
+    volumes:
+      - ${OCI_DB_CA_PEM}:/tmp/certs/oci-db-ca.pem:ro
+      - ${OCI_DB_CA_PEM}:/home/opc/lexvita-db-ca.pem:ro

@@ -1,0 +1,35 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: atualei-legal-crawler
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - crawler:8080
+        labels:
+          service: atualei-legal-crawler
+
+  - job_name: plataforma-juridica
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - mvp:8082
+        labels:
+          service: plataforma-juridica
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: loki
+    static_configs:
+      - targets:
+          - loki:3100
+
+  - job_name: alloy
+    static_configs:
+      - targets:
+          - alloy:12345
