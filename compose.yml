@@ -59,6 +59,7 @@ services:
       MANAGEMENT_OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       CRAWLER_STORAGE_BASE_PATH: /app/data/legal-sources
       CRAWLER_OBSERVABILITY_LOG_FORMAT: json
+      LAW_CHANGE_WEBHOOK_URL: http://mvp:8082/api/v1/integrations/law-changes
     ports:
       - "${CRAWLER_PORT:-8080}:8080"
     volumes:
